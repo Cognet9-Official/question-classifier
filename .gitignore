@@ -50,3 +50,6 @@ temp/
 
 input/
 result/
+
+domain_failure_examples.txt
+domain_success_examples.txt

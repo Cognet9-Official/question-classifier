@@ -46,6 +46,50 @@ python main.py <입력파일경로> <출력파일경로>
 python main.py data/questions.xlsx output/classified.xlsx
 ```
 
+### Ground Truth 업데이트 (42개 Micro-Intent)
+
+기존의 21개 Ground Truth 도메인 대신, LLM이 분류한 42개 Micro-Intent (초세분화 의도)로 `input/input.xlsx` 파일의 `도메인 Ground Truth` 컬럼을 업데이트합니다. 이를 통해 RAG 시스템의 검색 정확도를 높일 수 있습니다.
+
+```bash
+python update_ground_truth.py
+```
+
+- **입력**: `input/input.xlsx` (원본 질문 데이터)
+- **출력**: `input/input_new_gt.xlsx` (업데이트된 Ground Truth를 포함한 새 파일)
+
+**컬럼 업데이트 방식**:
+- `도메인 Ground Truth` 컬럼이 LLM이 예측한 42개 Micro-Intent 중 하나로 업데이트됩니다.
+- LLM의 예측 확신도가 낮은 경우 (`Confidence Score < 0.6`), `미분류-{LLM_예측_의도}` 형식으로 저장되어 수동 검토가 필요함을 알립니다.
+
+### Micro-Intent 목록 관리
+
+`update_ground_truth.py` 및 도메인 분류기는 `src/micro_intents.json` 파일에 정의된 Micro-Intent 목록을 사용하여 **동적으로 프롬프트를 생성**하고 분류를 수행합니다.
+
+- **파일 경로**: `src/micro_intents.json`
+- **형식**: JSON 객체. 키(Key)는 Micro-Intent 이름이며, 값(Value)은 다음 정보를 포함하는 객체입니다.
+  - `gt`: 매핑될 기존 Ground Truth 도메인
+  - `category`: 프롬프트 상에서 보여질 상위 카테고리 그룹명
+  - `desc`: 프롬프트 상에서 보여질 해당 의도에 대한 설명
+
+- **예시**:
+  ```json
+  {
+      "주소/연락처 변경": {
+          "gt": "고객정보",
+          "category": "정보/명의 변경",
+          "desc": "이사, 전화번호 변경"
+      },
+      "새로운 의도 이름": {
+          "gt": "매핑될_GT_도메인",
+          "category": "새로운_카테고리",
+          "desc": "이 의도에 대한 설명"
+      }
+  }
+  ```
+
+  **주의**: `micro_intents.json`을 수정하면 도메인 분류기의 프롬프트가 자동으로 변경됩니다. 수정 후에는 반드시 `update_ground_truth.py`를 다시 실행하여 데이터셋의 정합성을 맞춰주세요.
+
+
 ## 입력 파일 형식
 
 엑셀 파일은 다음과 같은 구조여야 합니다:

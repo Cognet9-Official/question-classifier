@@ -37,7 +37,7 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.excel_handler import ExcelHandler
-from src.llm_classifier import LLMClassifier
+from src.llm_classifier import LLMClassifier, map_to_hierarchical_domain
 from src.evaluator import Evaluator
 
 
@@ -321,8 +321,9 @@ def save_json_result(output_path: str, results: list, questions: list) -> bool:
     """
     결과를 JSON 파일로 저장 (LLM 분석용)
 
-    instruction.md 3.4 섹션에 정의된 형식으로 저장:
-    - 포함 필드: row, question, ground_truth, classified_domain, success, opinion_category
+    포함 필드:
+    - 기본: row, question, ground_truth, classified_domain, success, opinion_category
+    - 상위 도메인: super_domain_ground_truth, classified_super_domain, super_domain_success
     - 제외 필드: opinion (분류 의견)
 
     Args:
@@ -350,18 +351,32 @@ def save_json_result(output_path: str, results: list, questions: list) -> bool:
 
         # JSON 데이터 구성 (instruction.md 3.4 형식에 따라)
         # 분류 의견(opinion)은 제외하고 핵심 데이터만 포함
+        # + 상위 도메인 정보 추가
         json_data = []
         for result in results:
             row = result['row']
             item = question_dict.get(row, {})
 
+            ground_truth = item.get('ground_truth', '')
+            classified_domain = result['classified_domain']
+
+            # 13개 상위 도메인으로 매핑
+            super_domain_gt = map_to_hierarchical_domain(ground_truth)
+            super_domain_classified = map_to_hierarchical_domain(classified_domain)
+
+            # 상위 도메인 레벨에서의 성공 여부
+            super_domain_success = 'O' if super_domain_gt == super_domain_classified else 'X'
+
             json_data.append({
                 'row': row,
                 'question': item.get('question', ''),
-                'ground_truth': item.get('ground_truth', ''),
-                'classified_domain': result['classified_domain'],
+                'ground_truth': ground_truth,
+                'classified_domain': classified_domain,
                 'success': result['success'],
-                'opinion_category': result['opinion_category']
+                'opinion_category': result['opinion_category'],
+                'super_domain_ground_truth': super_domain_gt if super_domain_gt else '',
+                'classified_super_domain': super_domain_classified if super_domain_classified else '',
+                'super_domain_success': super_domain_success if (super_domain_gt and super_domain_classified) else ''
             })
 
         # JSON 파일 저장 (UTF-8 인코딩, 들여쓰기 2칸)
