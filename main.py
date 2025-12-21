@@ -25,6 +25,9 @@ import os
 import argparse
 import logging
 import time
+import json
+import random
+from collections import defaultdict
 from datetime import datetime
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -188,6 +191,72 @@ def parse_arguments():
     return parser.parse_args()
 
 
+def stratified_sample(questions, limit):
+    """
+    Ground Truth 비율에 맞춰 층화 추출 (랜덤 샘플링)
+
+    Args:
+        questions: 전체 질문 리스트
+        limit: 추출할 샘플 개수
+
+    Returns:
+        샘플링된 질문 리스트
+    """
+    total_count = len(questions)
+    if limit >= total_count:
+        return questions
+
+    # Ground Truth별로 그룹화
+    groups = defaultdict(list)
+    for q in questions:
+        gt = q.get('ground_truth', 'Unknown')
+        groups[gt].append(q)
+
+    # 그룹별 할당량 계산
+    # 1. 일단 비율대로 정수 할당
+    targets = {}
+    remaining_limit = limit
+
+    # 비율 계산을 위해 미리 리스트화
+    group_items = list(groups.items())
+    
+    # 소수점 오차 처리를 위한 잔여값 저장 리스트
+    remainders = []
+
+    for gt, items in group_items:
+        ratio = len(items) / total_count
+        exact_target = ratio * limit
+        int_target = int(exact_target)
+        
+        targets[gt] = int_target
+        remaining_limit -= int_target
+        
+        # 소수점 부분 저장 (나중에 남은 limit 배분용)
+        remainders.append((gt, exact_target - int_target))
+
+    # 2. 남은 할당량을 소수점 부분이 큰 순서대로 배분
+    remainders.sort(key=lambda x: x[1], reverse=True)
+    
+    for i in range(remaining_limit):
+        gt = remainders[i % len(remainders)][0]
+        targets[gt] += 1
+
+    # 3. 실제 샘플링 수행
+    sampled_questions = []
+    for gt, target in targets.items():
+        items = groups[gt]
+        # target이 실제 아이템 수보다 클 수는 없음 (계산상)
+        # 하지만 안전장치로 min 적용
+        count = min(target, len(items))
+        if count > 0:
+            sampled_questions.extend(random.sample(items, count))
+
+    # 결과 리스트 섞기 (도메인별로 뭉쳐있지 않게)
+    random.shuffle(sampled_questions)
+    
+    return sampled_questions
+
+
 def process_single_question(classifier, item, evaluator, print_lock, thinking_time):
     """
     단일 질문 처리 (스레드에서 실행)
@@ -248,6 +317,67 @@ def process_single_question(classifier, item, evaluator, print_lock, thinking_ti
     }
 
 
+def save_json_result(output_path: str, results: list, questions: list) -> bool:
+    """
+    결과를 JSON 파일로 저장 (LLM 분석용)
+
+    instruction.md 3.4 섹션에 정의된 형식으로 저장:
+    - 포함 필드: row, question, ground_truth, classified_domain, success, opinion_category
+    - 제외 필드: opinion (분류 의견)
+
+    Args:
+        output_path: Excel 출력 파일 경로
+        results: 분류 결과 리스트
+        questions: 원본 질문 데이터 리스트
+
+    Returns:
+        저장 성공 여부
+    """
+    try:
+        # Excel 경로를 기반으로 JSON 경로 생성
+        json_path = output_path.replace('.xlsx', '.json')
+
+        # 결과 디렉토리 생성 (존재하지 않는 경우)
+        json_dir = os.path.dirname(json_path)
+        if json_dir and not os.path.exists(json_dir):
+            os.makedirs(json_dir)
+            logging.debug(f"JSON 결과 디렉토리 생성: {json_dir}")
+
+        logging.info(f"JSON 결과 파일 작성 중... ({len(results)}개 항목)")
+
+        # 질문 데이터를 딕셔너리로 변환 (빠른 검색을 위해)
+        question_dict = {item['row']: item for item in questions}
+
+        # JSON 데이터 구성 (instruction.md 3.4 형식에 따라)
+        # 분류 의견(opinion)은 제외하고 핵심 데이터만 포함
+        json_data = []
+        for result in results:
+            row = result['row']
+            item = question_dict.get(row, {})
+
+            json_data.append({
+                'row': row,
+                'question': item.get('question', ''),
+                'ground_truth': item.get('ground_truth', ''),
+                'classified_domain': result['classified_domain'],
+                'success': result['success'],
+                'opinion_category': result['opinion_category']
+            })
+
+        # JSON 파일 저장 (UTF-8 인코딩, 들여쓰기 2칸)
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, ensure_ascii=False, indent=2)
+
+        logging.info(f"JSON 결과가 {json_path}에 저장되었습니다. (총 {len(json_data)}개 항목)")
+        return True
+
+    except Exception as e:
+        logging.error(f"JSON 결과 파일 저장 실패: {str(e)}")
+        import traceback
+        logging.debug(f"스택 트레이스:\n{traceback.format_exc()}")
+        return False
+
+
 def main():
     """메인 실행 함수"""
     # 로깅 설정
@@ -289,11 +419,11 @@ def main():
         excel_handler.close()
         sys.exit(1)
 
-    # 개수 제한 적용
+    # 개수 제한 및 층화 추출 적용
     if args.limit and args.limit > 0:
         original_count = len(questions)
-        questions = questions[:args.limit]
-        logging.info(f"개수 제한 적용: {original_count}개 중 {len(questions)}개 선택")
+        questions = stratified_sample(questions, args.limit)
+        logging.info(f"층화 랜덤 샘플링 적용: {original_count}개 중 {len(questions)}개 선택 (도메인 비율 유지)")
 
     # LLM 분류기 초기화
     classifier = LLMClassifier(
@@ -407,6 +537,9 @@ def main():
         logging.info(f"결과가 {args.output}에 저장되었습니다.")
     else:
         logging.error("결과 파일 저장에 실패했습니다.")
+
+    # JSON 결과 파일 저장 (LLM 분석용)
+    save_json_result(args.output, results, questions)
 
     # 통계 출력
     evaluator.print_statistics()

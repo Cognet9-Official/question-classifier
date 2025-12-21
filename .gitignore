@@ -33,6 +33,9 @@ ENV/
 !input/.gitkeep
 !result/.gitkeep
 
+# JSON result files (LLM analysis)
+*.json
+
 # OS
 .DS_Store
 Thumbs.db
