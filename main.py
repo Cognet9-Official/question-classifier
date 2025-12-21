@@ -275,11 +275,11 @@ def process_single_question(classifier, item, evaluator, print_lock, thinking_ti
     question = item['question']
     ground_truth = item['ground_truth']
 
-    # LLM을 사용하여 도메인 분류
-    classified_domain, opinion, opinion_category = classifier.classify(question)
+    # LLM을 사용하여 도메인 분류 (실험19: Top-3 다중 의도 추론)
+    classified_domains, opinion, opinion_category = classifier.classify(question)
 
     # API 호출 실패 감지
-    if classified_domain is None:
+    if classified_domains is None or (len(classified_domains) > 0 and classified_domains[0] is None):
         with print_lock:
             logging.error("=" * 60)
             logging.error(f"[행: {row}] LLM API 호출 실패")
@@ -295,22 +295,48 @@ def process_single_question(classifier, item, evaluator, print_lock, thinking_ti
         logging.debug(f"[행: {row}] API 호출 후 {thinking_time}초 대기 중...")
         time.sleep(thinking_time)
 
-    # 결과 평가
-    success = evaluator.evaluate(classified_domain, ground_truth)
+    # Hit@K 평가: Top-K 중 하나라도 정답이면 성공
+    # Ground Truth와 비교 (대소문자 무시, 공백 제거)
+    gt_normalized = ground_truth.strip().lower()
+    hit = False
+    hit_rank = -1
 
-    # Matched된 경우 의견 구분을 "정확히 분류됨"으로 자동 설정
+    for rank, domain in enumerate(classified_domains, start=1):
+        if domain and domain.strip().lower() == gt_normalized:
+            hit = True
+            hit_rank = rank
+            break
+
+    success = 'O' if hit else 'X'
+
+    # 통계 업데이트 (1순위 도메인 기준으로 evaluator 업데이트)
+    # evaluator는 내부적으로 통계를 유지하므로 호출해야 함
+    primary_domain = classified_domains[0] if classified_domains else "없음"
+    evaluator.evaluate(primary_domain, ground_truth)
+
+    # success 기준으로 의견 구분 자동 설정 (LLM의 잘못된 판단 방지)
     if success == 'O':
         opinion_category = "정확히 분류됨"
+    else:
+        # success가 'X'인 경우, LLM이 "정확히 분류됨"이라고 했어도 무시
+        if opinion_category == "정확히 분류됨":
+            opinion_category = "오분류"
 
     # 스레드 안전한 로깅
     with print_lock:
         question_display = f"{question[:50]}..." if len(question) > 50 else question
+        domains_str = " → ".join(classified_domains[:3])  # Top-3만 표시
         logging.info(f"[행: {row}] {question_display}")
-        logging.info(f"  정답: {ground_truth} | 분류: {classified_domain} | 결과: {success}")
+        if hit:
+            logging.info(f"  정답: {ground_truth} | 분류: {domains_str} | Hit@{hit_rank} ✓")
+        else:
+            logging.info(f"  정답: {ground_truth} | 분류: {domains_str} | Miss ✗")
 
     return {
         'row': row,
-        'classified_domain': classified_domain,
+        'classified_domain': primary_domain,  # 1순위 도메인 (하위 호환성)
+        'classified_domains': classified_domains,  # Top-K 전체 (실험19)
+        'hit_rank': hit_rank if hit else None,  # Hit된 순위
         'success': success,
         'opinion': opinion,
         'opinion_category': opinion_category
@@ -371,7 +397,9 @@ def save_json_result(output_path: str, results: list, questions: list) -> bool:
                 'row': row,
                 'question': item.get('question', ''),
                 'ground_truth': ground_truth,
-                'classified_domain': classified_domain,
+                'classified_domain': classified_domain,  # 1순위 도메인 (하위 호환성)
+                'classified_domains': result.get('classified_domains', [classified_domain]),  # 실험19: Top-K
+                'hit_rank': result.get('hit_rank'),  # 실험19: Hit@K 순위
                 'success': result['success'],
                 'opinion_category': result['opinion_category'],
                 'super_domain_ground_truth': super_domain_gt if super_domain_gt else '',
